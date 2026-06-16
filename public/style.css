@@ -354,6 +354,35 @@ body {
     color: var(--console-err);
 }
 
+#terminal-input-line {
+    display: flex;
+    align-items: center;
+    background-color: var(--console-bg);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    padding: 8px 0;
+    margin-top: 8px;
+}
+
+#terminal-input-line .prompt {
+    color: var(--console-text);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 700;
+    margin-right: 8px;
+    user-select: none;
+}
+
+#terminal-stdin {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    caret-color: var(--accent);
+}
+
 /* --- Footer Area --- */
 .app-footer {
     display: flex;

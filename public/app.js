@@ -12,11 +12,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const connStatus = document.getElementById('connection-status');
     const serverUserSpan = document.getElementById('server-user');
 
+    // Stdin interactive elements
+    const terminalInputLine = document.getElementById('terminal-input-line');
+    const terminalStdin = document.getElementById('terminal-stdin');
+
     // System Info spans
     const infoOs = document.getElementById('info-os');
     const infoHost = document.getElementById('info-host');
     const infoUidGid = document.getElementById('info-uid-gid');
     const infoShell = document.getElementById('info-shell');
+
+    let socket = null;
 
     // Preset Python scripts
     const templates = {
@@ -46,6 +52,28 @@ print("Usuario (whoami):")
 os.system("whoami")
 print("Identificadores (id):")
 os.system("id")
+`,
+        interactive: `# Entrada Interactiva de Usuario (stdin)
+import sys
+
+print("=== Demostración de Entrada de Usuario (stdin) ===")
+print("Escribe tus respuestas en la línea inferior y presiona Enter.")
+print("-" * 55)
+
+try:
+    nombre = input("Introduce tu nombre: ")
+    print(f"[+] Hola, {nombre}!")
+    
+    ciudad = input("¿De qué ciudad eres?: ")
+    print(f"[+] ¡Excelente! {nombre} de {ciudad}.")
+    
+    numero = input("Escribe un número para duplicar: ")
+    val = int(numero)
+    print(f"[+] El doble de {val} es {val * 2}.")
+except ValueError:
+    print("[-] Eso no parece un número válido.")
+except Exception as e:
+    print("[-] Ocurrió un error leyendo la entrada:", e)
 `,
         processes: `# Listar Procesos del Sistema
 import os
@@ -158,6 +186,12 @@ os.system("id")
         }
     });
 
+    // Add interactive option to presets select element
+    const interactiveOpt = document.createElement('option');
+    interactiveOpt.value = 'interactive';
+    interactiveOpt.textContent = 'Entrada Interactiva (input)';
+    presetsSelect.insertBefore(interactiveOpt, presetsSelect.children[2]);
+
     // Set default preset
     codeEditor.value = templates.basic;
     updateLineNumbers();
@@ -193,8 +227,32 @@ os.system("id")
     // Initial system load
     fetchSystemInfo();
 
-    // Run code trigger
-    runBtn.addEventListener('click', async () => {
+    // Send stdin input on Enter
+    terminalStdin.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const val = terminalStdin.value;
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                // Send text with newline to python process stdin
+                socket.send(JSON.stringify({ type: 'input', data: val + '\n' }));
+                
+                // Echo typed input to terminal
+                const echoSpan = document.createElement('span');
+                echoSpan.style.color = '#ffffff';
+                echoSpan.style.fontWeight = 'bold';
+                echoSpan.textContent = val + '\n';
+                terminalOutput.appendChild(echoSpan);
+                terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            }
+            terminalStdin.value = '';
+        }
+    });
+
+    // Run code trigger via WebSockets
+    runBtn.addEventListener('click', () => {
+        if (socket) {
+            try { socket.close(); } catch(e) {}
+        }
+
         const code = codeEditor.value;
         
         // Disable button & show executing state
@@ -203,80 +261,106 @@ os.system("id")
             <svg class="run-icon spinning" viewBox="0 0 24 24" width="18" height="18" style="animation: spin 1s linear infinite;">
                 <path fill="currentColor" d="M12 4V2C6.48 2 2 6.48 2 12h2c0-4.41 3.59-8 8-8zm0 14c4.41 0 8-3.59 8-8h2c0 5.52-4.48 10-10 10v-2z"/>
             </svg>
-            EJECUTANDO...
+            CONECTANDO...
         `;
         
-        terminalOutput.innerHTML = '<div class="sys-msg">// Enviando petición y ejecutando en el servidor...</div>';
+        terminalOutput.innerHTML = '<div class="sys-msg">// Estableciendo sesión de ejecución en tiempo real...</div>';
         terminalStats.style.display = 'none';
+        terminalInputLine.style.display = 'none';
 
-        try {
-            const res = await fetch('/api/run', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ code })
-            });
+        // Connect via WebSocket
+        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProto}//${window.location.host}`;
+        
+        socket = new WebSocket(wsUrl);
 
-            if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.error || 'Execution failed');
-            }
-
-            const data = await res.json();
-            
-            // Render outputs
+        socket.onopen = () => {
             terminalOutput.innerHTML = '';
-            
-            if (data.stdout) {
-                const stdoutDiv = document.createElement('div');
-                stdoutDiv.textContent = data.stdout;
-                terminalOutput.appendChild(stdoutDiv);
-            }
-            
-            if (data.stderr) {
-                const stderrDiv = document.createElement('div');
-                stderrDiv.className = 'stderr';
-                stderrDiv.textContent = data.stderr;
-                terminalOutput.appendChild(stderrDiv);
-            }
-
-            if (!data.stdout && !data.stderr) {
-                terminalOutput.innerHTML = '<div class="sys-msg">// El proceso terminó sin producir salida.</div>';
-            }
-
-            // Show execution details
-            statExit.textContent = data.exitCode !== null ? data.exitCode : 'Killed/Timeout';
-            statTime.textContent = `${data.timeMs}ms`;
-            
-            if (data.exitCode === 0) {
-                statExit.style.color = 'var(--accent)';
-            } else {
-                statExit.style.color = 'var(--console-err)';
-            }
-            
-            terminalStats.style.display = 'flex';
-            
-            // Scroll to the bottom of the output
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-
-        } catch (err) {
-            terminalOutput.innerHTML = `<div class="stderr">Error de Conexión o Servidor: ${err.message}</div>`;
-        } finally {
-            // Restore button state
-            runBtn.disabled = false;
             runBtn.innerHTML = `
-                <svg class="run-icon" viewBox="0 0 24 24" width="18" height="18">
-                    <path fill="currentColor" d="M8 5v14l11-7z"/>
+                <svg class="run-icon spinning" viewBox="0 0 24 24" width="18" height="18" style="animation: spin 1s linear infinite;">
+                    <path fill="currentColor" d="M12 4V2C6.48 2 2 6.48 2 12h2c0-4.41 3.59-8 8-8zm0 14c4.41 0 8-3.59 8-8h2c0 5.52-4.48 10-10 10v-2z"/>
                 </svg>
-                EJECUTAR CÓDIGO
+                EJECUTANDO...
             `;
-        }
+            
+            // Send the code to execute
+            socket.send(JSON.stringify({ type: 'run', code }));
+            
+            // Show interactive stdin input prompt
+            terminalInputLine.style.display = 'flex';
+            terminalStdin.value = '';
+            terminalStdin.focus();
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                
+                if (msg.type === 'stdout') {
+                    const span = document.createElement('span');
+                    span.textContent = msg.data;
+                    terminalOutput.appendChild(span);
+                    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+                } else if (msg.type === 'stderr') {
+                    const span = document.createElement('span');
+                    span.className = 'stderr';
+                    span.textContent = msg.data;
+                    terminalOutput.appendChild(span);
+                    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+                } else if (msg.type === 'exit') {
+                    // Show execution statistics
+                    statExit.textContent = msg.code !== null ? msg.code : 'Killed/Timeout';
+                    statTime.textContent = `${msg.timeMs}ms`;
+                    
+                    if (msg.code === 0) {
+                        statExit.style.color = 'var(--accent)';
+                    } else {
+                        statExit.style.color = 'var(--console-err)';
+                    }
+                    
+                    terminalStats.style.display = 'flex';
+                    terminalInputLine.style.display = 'none';
+                    resetRunButton();
+                }
+            } catch (err) {
+                console.error('Failed to parse WebSocket message:', err);
+            }
+        };
+
+        socket.onerror = (err) => {
+            console.error('WebSocket Error:', err);
+            const errDiv = document.createElement('div');
+            errDiv.className = 'stderr';
+            errDiv.textContent = '\nError de Conexión en tiempo real.';
+            terminalOutput.appendChild(errDiv);
+            terminalInputLine.style.display = 'none';
+            resetRunButton();
+        };
+
+        socket.onclose = () => {
+            terminalInputLine.style.display = 'none';
+            resetRunButton();
+            socket = null;
+        };
     });
+
+    function resetRunButton() {
+        runBtn.disabled = false;
+        runBtn.innerHTML = `
+            <svg class="run-icon" viewBox="0 0 24 24" width="18" height="18">
+                <path fill="currentColor" d="M8 5v14l11-7z"/>
+            </svg>
+            EJECUTAR CÓDIGO
+        `;
+    }
 
     // Clear console trigger
     clearBtn.addEventListener('click', () => {
         terminalOutput.innerHTML = '<div class="sys-msg">// Consola limpia. Esperando ejecución de código...</div>';
         terminalStats.style.display = 'none';
+        terminalInputLine.style.display = 'none';
+        if (socket) {
+            try { socket.close(); } catch(e) {}
+        }
     });
 });

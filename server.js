@@ -4,6 +4,8 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
+const WebSocket = require('ws');
 
 const app = express();
 const PORT = 3000;
@@ -18,8 +20,101 @@ if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir);
 }
 
+// Create HTTP Server
+const server = http.createServer(app);
+
+// Create WebSocket Server
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws) => {
+    let pythonProcess = null;
+    let tempFile = null;
+    let timeout = null;
+    let startTime = null;
+
+    ws.on('message', (messageStr) => {
+        try {
+            const msg = JSON.parse(messageStr);
+            
+            if (msg.type === 'run') {
+                const { code } = msg;
+                if (typeof code !== 'string') {
+                    ws.send(JSON.stringify({ type: 'stderr', data: 'Error: Code must be a string' }));
+                    ws.close();
+                    return;
+                }
+
+                // Generate a unique filename to prevent concurrency collisions
+                const fileId = Math.random().toString(36).substring(2, 10);
+                tempFile = path.join(tempDir, `run_${fileId}.py`);
+
+                // Write python code to temporary file
+                fs.writeFile(tempFile, code, (err) => {
+                    if (err) {
+                        console.error('Error writing temp file:', err);
+                        ws.send(JSON.stringify({ type: 'stderr', data: 'Error: Failed to write code to disk' }));
+                        ws.close();
+                        return;
+                    }
+
+                    startTime = process.hrtime();
+                    
+                    // Crucial: Use '-u' flag to force Python to flush stdout/stderr immediately (unbuffered)
+                    // so input() prompts are streamed instantly.
+                    pythonProcess = spawn('python3', ['-u', tempFile]);
+
+                    pythonProcess.stdout.on('data', (data) => {
+                        ws.send(JSON.stringify({ type: 'stdout', data: data.toString() }));
+                    });
+
+                    pythonProcess.stderr.on('data', (data) => {
+                        ws.send(JSON.stringify({ type: 'stderr', data: data.toString() }));
+                    });
+
+                    // Set timeout of 60 seconds for interactive sessions (longer to allow user input)
+                    timeout = setTimeout(() => {
+                        if (pythonProcess) {
+                            pythonProcess.kill();
+                            ws.send(JSON.stringify({ type: 'stderr', data: '\n[Execution Timeout: Terminated after 60 seconds]' }));
+                        }
+                    }, 60000);
+
+                    pythonProcess.on('close', (code) => {
+                        if (timeout) clearTimeout(timeout);
+                        cleanupFile(tempFile);
+
+                        const diff = process.hrtime(startTime);
+                        const timeMs = Math.round((diff[0] * 1e9 + diff[1]) / 1e6);
+
+                        ws.send(JSON.stringify({ type: 'exit', code, timeMs }));
+                        ws.close();
+                    });
+                });
+            } else if (msg.type === 'input') {
+                if (pythonProcess && pythonProcess.stdin.writable) {
+                    pythonProcess.stdin.write(msg.data);
+                }
+            }
+        } catch (err) {
+            console.error('Error processing WS message:', err);
+        }
+    });
+
+    ws.on('close', () => {
+        if (timeout) clearTimeout(timeout);
+        if (pythonProcess) {
+            try {
+                pythonProcess.kill();
+            } catch (e) {}
+        }
+        if (tempFile) {
+            cleanupFile(tempFile);
+        }
+    });
+});
+
 /**
- * Endpoint to execute python code
+ * Fallback POST Endpoint to execute python code (non-interactive)
  */
 app.post('/api/run', (req, res) => {
     const { code } = req.body;
@@ -27,11 +122,9 @@ app.post('/api/run', (req, res) => {
         return res.status(400).json({ error: 'Code must be a string' });
     }
 
-    // Generate a unique filename to prevent concurrency collisions
     const fileId = Math.random().toString(36).substring(2, 10);
     const tempFile = path.join(tempDir, `run_${fileId}.py`);
 
-    // Write python code to temporary file
     fs.writeFile(tempFile, code, (err) => {
         if (err) {
             console.error('Error writing temp file:', err);
@@ -52,7 +145,6 @@ app.post('/api/run', (req, res) => {
             stderr += data.toString();
         });
 
-        // Set a timeout to prevent infinite loops (e.g. while True:)
         const timeout = setTimeout(() => {
             pythonProcess.kill();
             cleanupFile(tempFile);
@@ -113,7 +205,8 @@ function cleanupFile(filePath) {
     });
 }
 
-app.listen(PORT, HOST, () => {
+// Start HTTP + WebSocket Server
+server.listen(PORT, HOST, () => {
     console.log(`=============================================================`);
     console.log(`  PYTHON SANDBOX SECURITY LAB SERVER ACTIVE`);
     console.log(`  URL: http://${HOST}:${PORT}`);
