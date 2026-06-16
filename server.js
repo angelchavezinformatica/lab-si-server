@@ -29,7 +29,6 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
     let pythonProcess = null;
     let tempFile = null;
-    let timeout = null;
     let startTime = null;
 
     ws.on('message', (messageStr) => {
@@ -71,16 +70,7 @@ wss.on('connection', (ws) => {
                         ws.send(JSON.stringify({ type: 'stderr', data: data.toString() }));
                     });
 
-                    // Set timeout of 60 seconds for interactive sessions (longer to allow user input)
-                    timeout = setTimeout(() => {
-                        if (pythonProcess) {
-                            pythonProcess.kill();
-                            ws.send(JSON.stringify({ type: 'stderr', data: '\n[Execution Timeout: Terminated after 60 seconds]' }));
-                        }
-                    }, 60000);
-
                     pythonProcess.on('close', (code) => {
-                        if (timeout) clearTimeout(timeout);
                         cleanupFile(tempFile);
 
                         const diff = process.hrtime(startTime);
@@ -101,7 +91,6 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        if (timeout) clearTimeout(timeout);
         if (pythonProcess) {
             try {
                 pythonProcess.kill();
@@ -145,19 +134,7 @@ app.post('/api/run', (req, res) => {
             stderr += data.toString();
         });
 
-        const timeout = setTimeout(() => {
-            pythonProcess.kill();
-            cleanupFile(tempFile);
-            res.json({
-                stdout,
-                stderr: stderr + '\n[Execution Timeout: Terminated after 10 seconds]',
-                exitCode: -1,
-                timeMs: 10000
-            });
-        }, 10000);
-
         pythonProcess.on('close', (code) => {
-            clearTimeout(timeout);
             cleanupFile(tempFile);
 
             const diff = process.hrtime(startTime);
